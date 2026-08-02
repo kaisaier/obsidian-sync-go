@@ -217,6 +217,17 @@ export function getFileRenameForDup(key: string) {
   return res;
 }
 
+export function getAvailableDuplicateKey(
+  key: string,
+  occupiedKeys: ReadonlySet<string>
+) {
+  let candidate = getFileRenameForDup(key);
+  while (occupiedKeys.has(candidate)) {
+    candidate = getFileRenameForDup(candidate);
+  }
+  return candidate;
+}
+
 function arraysAreEqual(arr1: ArrayBuffer, arr2: ArrayBuffer) {
   if (arr1.byteLength !== arr2.byteLength) {
     return false;
@@ -347,23 +358,21 @@ export async function tryDuplicateFile(
   uploadCallback: (entity: Entity | undefined) => Promise<any>,
   downloadCallback: (entity: Entity | undefined) => Promise<any>
 ) {
-  let key2 = getFileRenameForDup(key);
-  let usable = false;
-  do {
-    try {
-      const s = await fsLocal.stat(key2);
-      if (s === null || s === undefined) {
-        throw Error(`not exist $${key2}`);
-      }
-      console.debug(`key2=${key2} exists, cannot use for new file`);
-      key2 = getFileRenameForDup(key2);
-      console.debug(`key2=${key2} is prepared for next try`);
-    } catch (e) {
-      // not exists, exactly what we want
-      console.debug(`key2=${key2} doesn't exist, usable for new file`);
-      usable = true;
-    }
-  } while (!usable);
+  // The duplicate is written to both sides. Build the occupied set from full
+  // listings so a remote-only file cannot be overwritten. Listing failures
+  // intentionally propagate: a network error must never be interpreted as
+  // proof that a candidate name is free.
+  const [localEntries, remoteEntries] = await Promise.all([
+    fsLocal.walk(),
+    fsRemote.walk(),
+  ]);
+  const occupiedKeys = new Set(
+    [...localEntries, ...remoteEntries]
+      .map((entry) => entry.key)
+      .filter((entryKey): entryKey is string => entryKey !== undefined)
+  );
+  const key2 = getAvailableDuplicateKey(key, occupiedKeys);
+  console.debug(`key2=${key2} is free on both local and remote`);
 
   const localSize = await fsLocal.stat(key);
   const remoteSize = await fsRemote.stat(key);

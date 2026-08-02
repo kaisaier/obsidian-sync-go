@@ -1,7 +1,10 @@
 import { deepStrictEqual, rejects, throws } from "assert";
+import type { FakeFs } from "../../src/fsAll";
 import {
+  getAvailableDuplicateKey,
   getFileRenameForDup,
   threeWayMerge,
+  tryDuplicateFile,
   twoWayMerge,
 } from "../src/conflictLogic";
 
@@ -70,6 +73,36 @@ describe("New name is generated", () => {
     deepStrictEqual(
       getFileRenameForDup("xxxx/yyyy/.abc.dup.md"),
       "xxxx/yyyy/.abc.dup.dup.md"
+    );
+  });
+
+  it("should avoid names occupied only on the remote side", () => {
+    const occupied = new Set(["note.dup.md", "note.dup.dup.md"]);
+    deepStrictEqual(
+      getAvailableDuplicateKey("note.md", occupied),
+      "note.dup.dup.dup.md"
+    );
+  });
+
+  it("should abort duplicate handling when either listing fails", async () => {
+    const local = {
+      walk: async () => [],
+    } as unknown as FakeFs;
+    const remote = {
+      walk: async () => {
+        throw new Error("remote listing failed");
+      },
+    } as unknown as FakeFs;
+
+    await rejects(
+      tryDuplicateFile(
+        "note.md",
+        local,
+        remote,
+        async () => undefined,
+        async () => undefined
+      ),
+      /remote listing failed/
     );
   });
 });

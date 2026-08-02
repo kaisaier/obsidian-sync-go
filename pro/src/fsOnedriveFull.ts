@@ -1,4 +1,3 @@
-import { CryptoProvider, PublicClientApplication } from "@azure/msal-node";
 import type { AuthenticationProvider } from "@microsoft/microsoft-graph-client";
 import type {
   DriveItem,
@@ -18,6 +17,10 @@ import {
 import { VALID_REQURL } from "../../src/baseTypesObs";
 import { FakeFs } from "../../src/fsAll";
 import { bufferToArrayBuffer } from "../../src/misc";
+import {
+  generatePkceCodes,
+  getOAuth2AuthorizationUrl,
+} from "../../src/oauth2Pkce";
 import {
   COMMAND_CALLBACK_ONEDRIVEFULL,
   type OnedriveFullConfig,
@@ -48,33 +51,18 @@ export async function getAuthUrlAndVerifier(
   clientID: string,
   authority: string
 ) {
-  const cryptoProvider = new CryptoProvider();
-  const { verifier, challenge } = await cryptoProvider.generatePkceCodes();
-
-  const pkceCodes = {
-    challengeMethod: "S256", // Use SHA256 Algorithm
-    verifier: verifier,
-    challenge: challenge,
-  };
-
-  const authCodeUrlParams = {
-    redirectUri: REDIRECT_URI,
-    scopes: SCOPES,
-    codeChallenge: pkceCodes.challenge, // PKCE Code Challenge
-    codeChallengeMethod: pkceCodes.challengeMethod, // PKCE Code Challenge Method
-  };
-
-  const pca = new PublicClientApplication({
-    auth: {
-      clientId: clientID,
-      authority: authority,
-    },
-  });
-  const authCodeUrl = await pca.getAuthCodeUrl(authCodeUrlParams);
+  const pkceCodes = await generatePkceCodes();
+  const authCodeUrl = getOAuth2AuthorizationUrl(
+    authority,
+    clientID,
+    REDIRECT_URI,
+    SCOPES,
+    pkceCodes
+  );
 
   return {
     authUrl: authCodeUrl,
-    verifier: verifier,
+    verifier: pkceCodes.verifier,
   };
 }
 

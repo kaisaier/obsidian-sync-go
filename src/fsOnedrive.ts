@@ -1,4 +1,3 @@
-import { CryptoProvider, PublicClientApplication } from "@azure/msal-node";
 import type { AuthenticationProvider } from "@microsoft/microsoft-graph-client";
 import type {
   DriveItem,
@@ -20,6 +19,7 @@ import {
 import { VALID_REQURL } from "./baseTypesObs";
 import { FakeFs } from "./fsAll";
 import { bufferToArrayBuffer } from "./misc";
+import { generatePkceCodes, getOAuth2AuthorizationUrl } from "./oauth2Pkce";
 
 const SCOPES = ["User.Read", "Files.ReadWrite.AppFolder", "offline_access"];
 const REDIRECT_URI = `obsidian://${COMMAND_CALLBACK_ONEDRIVE}`;
@@ -46,33 +46,18 @@ export async function getAuthUrlAndVerifier(
   clientID: string,
   authority: string
 ) {
-  const cryptoProvider = new CryptoProvider();
-  const { verifier, challenge } = await cryptoProvider.generatePkceCodes();
-
-  const pkceCodes = {
-    challengeMethod: "S256", // Use SHA256 Algorithm
-    verifier: verifier,
-    challenge: challenge,
-  };
-
-  const authCodeUrlParams = {
-    redirectUri: REDIRECT_URI,
-    scopes: SCOPES,
-    codeChallenge: pkceCodes.challenge, // PKCE Code Challenge
-    codeChallengeMethod: pkceCodes.challengeMethod, // PKCE Code Challenge Method
-  };
-
-  const pca = new PublicClientApplication({
-    auth: {
-      clientId: clientID,
-      authority: authority,
-    },
-  });
-  const authCodeUrl = await pca.getAuthCodeUrl(authCodeUrlParams);
+  const pkceCodes = await generatePkceCodes();
+  const authCodeUrl = getOAuth2AuthorizationUrl(
+    authority,
+    clientID,
+    REDIRECT_URI,
+    SCOPES,
+    pkceCodes
+  );
 
   return {
     authUrl: authCodeUrl,
-    verifier: verifier,
+    verifier: pkceCodes.verifier,
   };
 }
 

@@ -1,12 +1,92 @@
 import { strict as assert } from "assert";
 import { rejects } from "assert";
+import type { Entity, MixedEntity } from "../../src/baseTypes";
 import type { FakeFs } from "../../src/fsAll";
 import type { FakeFsEncrypt } from "../../src/fsEncrypt";
 import type { InternalDBs } from "../../src/localdb";
 import {
   checkIsSkipItemOrNotByName,
   dispatchOperationToActualV3,
+  getSyncPlanInplace,
 } from "../src/sync";
+
+const entity = (key: string, mtime: number, size = 10): Entity => ({
+  key,
+  keyRaw: key,
+  keyEnc: key,
+  mtimeCli: mtime,
+  mtimeSvr: mtime,
+  size,
+  sizeRaw: size,
+  sizeEnc: size,
+});
+
+describe("Sync: core decision table", () => {
+  const decide = async (entry: MixedEntity) => {
+    (globalThis as any).window.moment = () => ({ format: () => "" });
+    const result = await getSyncPlanInplace(
+      { [entry.key]: entry },
+      -1,
+      "keep_newer",
+      "bidirectional",
+      undefined,
+      { serviceType: "s3", password: "" } as never,
+      "manual",
+      ".obsidian"
+    );
+    return result[entry.key].decision;
+  };
+
+  it("covers the destructive and conflict branches", async () => {
+    const previous = entity("note.md", 100);
+    const cases: Array<[string, MixedEntity, string]> = [
+      [
+        "equal",
+        {
+          key: "note.md",
+          local: entity("note.md", 100),
+          remote: entity("note.md", 100),
+          prevSync: previous,
+        },
+        "equal",
+      ],
+      [
+        "local create",
+        { key: "note.md", local: entity("note.md", 100) },
+        "local_is_created_then_push",
+      ],
+      [
+        "remote create",
+        { key: "note.md", remote: entity("note.md", 100) },
+        "remote_is_created_then_pull",
+      ],
+      [
+        "local delete",
+        { key: "note.md", remote: entity("note.md", 100), prevSync: previous },
+        "local_is_deleted_thus_also_delete_remote",
+      ],
+      [
+        "remote delete",
+        { key: "note.md", local: entity("note.md", 100), prevSync: previous },
+        "remote_is_deleted_thus_also_delete_local",
+      ],
+      [
+        "both modify",
+        {
+          key: "note.md",
+          local: entity("note.md", 300),
+          remote: entity("note.md", 200),
+          prevSync: previous,
+        },
+        "conflict_modified_then_keep_local",
+      ],
+    ];
+
+    for (const [label, input, expected] of cases) {
+      assert.equal(await decide(input), expected, label);
+    }
+  });
+});
 
 describe("Sync: per-item history transaction", () => {
   it("keeps previous sync history when a remote deletion fails", async () => {

@@ -542,7 +542,7 @@ const ensembleMixedEnties = async (
  * Basically follow the sync algorithm of https://github.com/Jwink3101/syncrclone
  * Also deal with syncDirection which makes it more complicated
  */
-const getSyncPlanInplace = async (
+export const getSyncPlanInplace = async (
   mixedEntityMappings: Record<string, MixedEntity>,
   skipSizeLargerThan: number,
   conflictAction: ConflictActionType,

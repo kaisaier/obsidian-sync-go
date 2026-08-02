@@ -37,6 +37,10 @@ import {
   unixTimeToStr,
 } from "../../src/misc";
 import type { Profiler } from "../../src/profiler";
+import {
+  assertRemoteListingPlausible,
+  retryRemoteOperation,
+} from "../../src/syncSafety";
 import { checkProRunnableAndFixInplace } from "./account";
 import { isMergable, mergeFile, tryDuplicateFile } from "./conflictLogic";
 import {
@@ -1399,7 +1403,7 @@ const fullfillMTimeOfRemoteEntityInplace = (
   return remote;
 };
 
-const dispatchOperationToActualV3 = async (
+export const dispatchOperationToActualV3 = async (
   key: string,
   vaultRandomID: string,
   profileID: string,
@@ -1959,7 +1963,11 @@ export async function syncer(
     if (fsEncrypt.innerFs !== fsRemote) {
       throw Error(`your enc should has inner of the remote`);
     }
-    const passwordCheckResult = await fsEncrypt.isPasswordOk();
+    const remoteTimeoutMs = 120_000;
+    const passwordCheckResult = await retryRemoteOperation(
+      () => fsEncrypt.isPasswordOk(),
+      { label: "remote password check", timeoutMs: remoteTimeoutMs }
+    );
     if (!passwordCheckResult.ok) {
       throw Error(passwordCheckResult.reason);
     }
@@ -1971,7 +1979,10 @@ export async function syncer(
     await notifyFunc?.(triggerSource, step);
     await ribboonFunc?.(triggerSource, step);
     await statusBarFunc?.(triggerSource, step, everythingOk);
-    const remoteEntityList = await fsEncrypt.walk();
+    const remoteEntityList = await retryRemoteOperation(
+      () => fsEncrypt.walk(),
+      { label: "remote listing", timeoutMs: remoteTimeoutMs }
+    );
     // console.debug(`remoteEntityList:`);
     // console.debug(remoteEntityList);
     profiler?.insert(`finish step${step} (list remote)`);
@@ -1993,6 +2004,12 @@ export async function syncer(
       db,
       vaultRandomID,
       profileID
+    );
+    assertRemoteListingPlausible(
+      prevSyncEntityList,
+      remoteEntityList,
+      settings.syncDirection ?? "bidirectional",
+      settings.protectModifyPercentage ?? 50
     );
     // console.debug(`prevSyncEntityList:`);
     // console.debug(prevSyncEntityList);

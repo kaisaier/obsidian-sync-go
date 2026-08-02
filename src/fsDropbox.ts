@@ -396,7 +396,8 @@ export class FakeFsDropbox extends FakeFs {
       this.dropbox = new Dropbox({
         accessToken: this.dropboxConfig.accessToken,
         customHeaders: customHeaders,
-      });
+        autoContentHash: false,
+      } as any);
     } else {
       if (this.dropboxConfig.refreshToken === "") {
         throw Error(
@@ -416,7 +417,8 @@ export class FakeFsDropbox extends FakeFs {
       this.dropbox = new Dropbox({
         accessToken: this.dropboxConfig.accessToken,
         customHeaders: customHeaders,
-      });
+        autoContentHash: false,
+      } as any);
     }
 
     // check vault folder

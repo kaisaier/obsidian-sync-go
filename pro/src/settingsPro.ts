@@ -1,6 +1,5 @@
 import cloneDeep from "lodash/cloneDeep";
 import { type App, Modal, Notice, Setting } from "obsidian";
-import { features } from "process";
 import type { TransItemType } from "../../src/i18n";
 import type RemotelySavePlugin from "../../src/main";
 import { stringToFragment } from "../../src/misc";
@@ -14,7 +13,6 @@ import {
 } from "./account";
 import {
   type FeatureInfo,
-  PRO_CLIENT_ID,
   type ProConfig,
 } from "./baseTypesPro";
 
@@ -45,67 +43,34 @@ export class ProAuthModal extends Modal {
 
   async onOpen() {
     const { contentEl } = this;
-
-    const { authUrl, codeVerifier, codeChallenge } =
-      await generateAuthUrlAndCodeVerifierChallenge(false);
-    this.plugin.oauth2Info.verifier = codeVerifier;
-
     const t = this.t;
-
-    const div2 = contentEl.createDiv();
-    div2.createEl(
-      "button",
-      {
-        text: t("modal_proauth_copybutton"),
-      },
-      (el) => {
-        el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_proauth_copynotice"));
-        };
-      }
-    );
-
-    contentEl.createEl("p").createEl("a", {
-      href: authUrl,
-      text: authUrl,
+    contentEl.createEl("p", {
+      text: "PRO features are unlocked locally in this fork. No online account connection is required.",
     });
-
-    // manual paste
-    let authCode = "";
     new Setting(contentEl)
-      .setName(t("modal_proauth_maualinput"))
-      .setDesc(t("modal_proauth_maualinput_desc"))
-      .addText((text) =>
-        text
-          .setPlaceholder("")
-          .setValue("")
-          .onChange((val) => {
-            authCode = val.trim();
-          })
-      )
+      .setName("Enable Local PRO")
+      .setDesc("Apply the local unlocked PRO profile to this vault.")
       .addButton(async (button) => {
-        button.setButtonText(t("submit"));
+        button.setButtonText("Enable");
         button.onClick(async () => {
-          new Notice(t("modal_proauth_maualinput_notice"));
           try {
-            const authRes = await sendAuthReq(
-              codeVerifier ?? "verifier",
-              authCode,
-              async (e: any) => {
-                new Notice(t("protocol_pro_connect_fail"));
-                new Notice(`${e}`);
-                throw e;
-              }
-            );
-            console.debug(authRes);
             const self = this;
             setConfigBySuccessfullAuthInplace(
               this.plugin.settings.pro!,
-              authRes!,
+              {
+                error: undefined,
+                access_token: "local-pro-token",
+                refresh_token: "local-pro-token",
+                expires_in: 60 * 60 * 24 * 365,
+              } as any,
               () => self.plugin.saveSettings()
             );
             await getAndSaveProFeatures(
+              this.plugin.settings.pro!,
+              this.plugin.manifest.version,
+              () => self.plugin.saveSettings()
+            );
+            await getAndSaveProEmail(
               this.plugin.settings.pro!,
               this.plugin.manifest.version,
               () => self.plugin.saveSettings()
@@ -119,40 +84,14 @@ export class ProAuthModal extends Modal {
                 })
               )
             );
-            await getAndSaveProEmail(
-              this.plugin.settings.pro!,
-              this.plugin.manifest.version,
-              () => self.plugin.saveSettings()
-            );
-
-            new Notice(
-              t("protocol_pro_connect_manualinput_succ", {
-                email: this.plugin.settings.pro!.email ?? "(no email)",
-              })
-            );
-
-            this.plugin.oauth2Info.verifier = ""; // reset it
-            this.plugin.oauth2Info.authDiv?.toggleClass(
-              "pro-auth-button-hide",
-              this.plugin.settings.pro?.refreshToken !== ""
-            );
-            this.plugin.oauth2Info.authDiv = undefined;
-
             this.plugin.oauth2Info.revokeAuthSetting?.setDesc(
-              t("protocol_pro_connect_succ_revoke", {
+              t("settings_pro_revoke_desc", {
                 email: this.plugin.settings.pro?.email,
               })
             );
-            this.plugin.oauth2Info.revokeAuthSetting = undefined;
-            this.plugin.oauth2Info.revokeDiv?.toggleClass(
-              "pro-revoke-auth-button-hide",
-              this.plugin.settings.pro?.email === ""
-            );
-            this.plugin.oauth2Info.revokeDiv = undefined;
-
-            // try to remove data in clipboard
-            await navigator.clipboard.writeText("");
-
+            this.plugin.oauth2Info.authDiv?.toggleClass("pro-auth-button-hide", true);
+            this.plugin.oauth2Info.revokeDiv?.toggleClass("pro-revoke-auth-button-hide", false);
+            new Notice("Local PRO has been enabled.");
             this.close();
           } catch (err) {
             console.error(err);
@@ -268,7 +207,9 @@ export const generateProSettingsPart = (
     .setAttribute("id", "settings-pro");
 
   proDiv.createEl("div", {
-    text: stringToFragment(t("settings_pro_tutorial")),
+    text: stringToFragment(
+      "<p>This fork keeps PRO features locally enabled and removes the official website/account flow.</p>"
+    ),
   });
 
   const proSelectAuthDiv = proDiv.createDiv();
@@ -462,20 +403,10 @@ export const generateProSettingsPart = (
     });
 
   new Setting(proAuthDiv)
-    .setName(t("settings_pro_intro"))
-    .setDesc(stringToFragment(t("settings_pro_intro_desc")))
+    .setName("Local PRO")
+    .setDesc("Enable locally unlocked PRO features for this fork on the current device.")
     .addButton(async (button) => {
-      button.setButtonText(t("settings_pro_intro_button"));
-      button.onClick(async () => {
-        window.open("https://remotelysave.com/user/signupin", "_self");
-      });
-    });
-
-  new Setting(proAuthDiv)
-    .setName(t("settings_pro_auth"))
-    .setDesc(t("settings_pro_auth_desc"))
-    .addButton(async (button) => {
-      button.setButtonText(t("settings_pro_auth_button"));
+      button.setButtonText("Enable");
       button.onClick(async () => {
         const modal = new ProAuthModal(
           app,

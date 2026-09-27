@@ -55,6 +55,18 @@ interface SyncPlanRecord {
   vaultRandomID: string;
 }
 
+export interface SyncLogRecord {
+  id: string;
+  ts: number;
+  tsFmt: string;
+  vaultRandomID: string;
+  remoteType: string;
+  triggerSource: string;
+  success: boolean;
+  summary: string;
+  lines: string[];
+}
+
 export interface InternalDBs {
   versionTbl: LocalForage;
   syncPlansTbl: LocalForage;
@@ -500,6 +512,77 @@ export const clearAllPrevSyncRecordByVault = async (
 export const clearAllLoggerOutputRecords = async (db: InternalDBs) => {
   await db.loggerOutputTbl.clear();
   console.debug(`successfully clearAllLoggerOutputRecords`);
+};
+
+export const insertSyncLogRecordByVault = async (
+  db: InternalDBs,
+  vaultRandomID: string,
+  remoteType: SUPPORTED_SERVICES_TYPE,
+  triggerSource: string,
+  success: boolean,
+  summary: string,
+  lines: string[]
+) => {
+  const now = Date.now();
+  const id = nanoid();
+  const record: SyncLogRecord = {
+    id,
+    ts: now,
+    tsFmt: unixTimeToStr(now),
+    vaultRandomID,
+    remoteType,
+    triggerSource,
+    success,
+    summary,
+    lines,
+  };
+  await db.loggerOutputTbl.setItem(`${vaultRandomID}\t${now}\t${id}`, record);
+};
+
+export const readAllSyncLogRecordsByVault = async (
+  db: InternalDBs,
+  vaultRandomID: string
+) => {
+  const records: SyncLogRecord[] = [];
+  await db.loggerOutputTbl.iterate((value, key) => {
+    if (key.startsWith(`${vaultRandomID}\t`)) {
+      records.push(value as SyncLogRecord);
+    }
+  });
+  records.sort((a, b) => -(a.ts - b.ts));
+  return records;
+};
+
+export const clearExpiredSyncLogRecords = async (db: InternalDBs) => {
+  const MILLISECONDS_OLD = 1000 * 60 * 60 * 24 * 7; // 7 days
+  const COUNT_TO_MANY = 30;
+
+  const currTs = Date.now();
+  const expiredTs = currTs - MILLISECONDS_OLD;
+
+  let records = (await db.loggerOutputTbl.keys()).map((key) => {
+    const parts = key.split("\t");
+    const ts = Number.parseInt(parts[1] ?? "-1");
+    return {
+      ts,
+      key,
+      expired: ts > 0 && ts <= expiredTs,
+    };
+  });
+
+  const keysToRemove = new Set(
+    records.filter((x) => x.expired).map((x) => x.key)
+  );
+
+  if (records.length - keysToRemove.size > COUNT_TO_MANY) {
+    records = records.filter((x) => !x.expired && x.ts > 0);
+    records.sort((a, b) => -(a.ts - b.ts));
+    records.slice(COUNT_TO_MANY).forEach((element) => {
+      keysToRemove.add(element.key);
+    });
+  }
+
+  await db.loggerOutputTbl.removeItems(Array.from(keysToRemove));
 };
 
 export const upsertLastSuccessSyncTimeByVault = async (

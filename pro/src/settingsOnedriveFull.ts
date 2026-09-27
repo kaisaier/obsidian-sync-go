@@ -1,5 +1,6 @@
 import cloneDeep from "lodash/cloneDeep";
 import { type App, Modal, Notice, Platform, Setting } from "obsidian";
+import { copyTextToClipboard } from "../../src/clipboard";
 import { getClient } from "../../src/fsGetter";
 import type { TransItemType } from "../../src/i18n";
 import type RemotelySavePlugin from "../../src/main";
@@ -67,8 +68,12 @@ export class OnedriveFullAuthModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_onedrivefullauth_copynotice"));
+          const copied = await copyTextToClipboard(authUrl);
+          new Notice(
+            copied
+              ? t("modal_onedrivefullauth_copynotice")
+              : t("clipboard_copy_failed")
+          );
         };
       }
     );

@@ -165,6 +165,15 @@ export interface RemotelySavePluginSettings {
   autoRunEveryMilliseconds?: number;
   initRunAfterMilliseconds?: number;
   syncOnSaveAfterMilliseconds?: number;
+  remoteListingTimeoutMilliseconds?: number;
+  autoRunNightEnabled?: boolean;
+  autoRunNightStartMinute?: number;
+  autoRunNightEndMinute?: number;
+  autoRunNightIntervalMilliseconds?: number;
+  autoRunInactivityEnabled?: boolean;
+  autoRunInactivityThresholdMilliseconds?: number;
+  autoRunInactivityIntervalMilliseconds?: number;
+  autoRunFailureBackoffEnabled?: boolean;
 
   concurrency?: number;
   syncConfigDir?: boolean;

@@ -1,5 +1,6 @@
 import cloneDeep from "lodash/cloneDeep";
 import { type App, Modal, Notice, Setting } from "obsidian";
+import { copyTextToClipboard } from "../../src/clipboard";
 import { getClient } from "../../src/fsGetter";
 import type { TransItemType } from "../../src/i18n";
 import type RemotelySavePlugin from "../../src/main";
@@ -49,8 +50,12 @@ class KoofrAuthModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_koofrauth_copynotice"));
+          const copied = await copyTextToClipboard(authUrl);
+          new Notice(
+            copied
+              ? t("modal_koofrauth_copynotice")
+              : t("clipboard_copy_failed")
+          );
         };
       }
     );

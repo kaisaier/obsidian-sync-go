@@ -2,6 +2,7 @@
 import AggregateError from "aggregate-error";
 import PQueue from "p-queue";
 import XRegExp from "xregexp";
+import { DEFAULT_REMOTE_LISTING_TIMEOUT_MS } from "../../src/autoSyncScheduler";
 import type {
   ConflictActionType,
   EmptyFolderCleanType,
@@ -39,8 +40,13 @@ import {
 import type { Profiler } from "../../src/profiler";
 import {
   assertRemoteListingPlausible,
-  retryRemoteOperation,
+  checkRemotePassword,
+  runRemoteListingPipeline,
 } from "../../src/syncSafety";
+import {
+  prepareTargetedSyncPlan,
+  type TargetedSyncRequest,
+} from "../../src/targetedSync";
 import { checkProRunnableAndFixInplace } from "./account";
 import { isMergable, mergeFile, tryDuplicateFile } from "./conflictLogic";
 import {
@@ -1934,7 +1940,8 @@ export async function syncer(
     step: number,
     everythingOk: boolean
   ) => any,
-  callbackSyncProcess?: any
+  callbackSyncProcess?: any,
+  targetedSync?: TargetedSyncRequest
 ) {
   console.info(`starting sync.`);
   markIsSyncingFunc(true);
@@ -1963,10 +1970,8 @@ export async function syncer(
     if (fsEncrypt.innerFs !== fsRemote) {
       throw Error(`your enc should has inner of the remote`);
     }
-    const remoteTimeoutMs = 120_000;
-    const passwordCheckResult = await retryRemoteOperation(
-      () => fsEncrypt.isPasswordOk(),
-      { label: "remote password check", timeoutMs: remoteTimeoutMs }
+    const passwordCheckResult = await checkRemotePassword(() =>
+      fsEncrypt.isPasswordOk()
     );
     if (!passwordCheckResult.ok) {
       throw Error(passwordCheckResult.reason);
@@ -1979,116 +1984,130 @@ export async function syncer(
     await notifyFunc?.(triggerSource, step);
     await ribboonFunc?.(triggerSource, step);
     await statusBarFunc?.(triggerSource, step, everythingOk);
-    const remoteEntityList = await retryRemoteOperation(
-      () => fsEncrypt.walk(),
-      { label: "remote listing", timeoutMs: remoteTimeoutMs }
-    );
-    // console.debug(`remoteEntityList:`);
-    // console.debug(remoteEntityList);
-    profiler?.insert(`finish step${step} (list remote)`);
-
-    step = 4;
-    await notifyFunc?.(triggerSource, step);
-    await ribboonFunc?.(triggerSource, step);
-    await statusBarFunc?.(triggerSource, step, everythingOk);
-    const localEntityList = await fsLocal.walk();
-    // console.debug(`localEntityList:`);
-    // console.debug(localEntityList);
-    profiler?.insert(`finish step${step} (list local)`);
-
-    step = 5;
-    await notifyFunc?.(triggerSource, step);
-    await ribboonFunc?.(triggerSource, step);
-    await statusBarFunc?.(triggerSource, step, everythingOk);
-    const prevSyncEntityList = await getAllPrevSyncRecordsByVaultAndProfile(
-      db,
-      vaultRandomID,
-      profileID
-    );
-    assertRemoteListingPlausible(
-      prevSyncEntityList,
-      remoteEntityList,
-      settings.syncDirection ?? "bidirectional",
-      settings.protectModifyPercentage ?? 50
-    );
-    // console.debug(`prevSyncEntityList:`);
-    // console.debug(prevSyncEntityList);
-    profiler?.insert(`finish step${step} (prev sync)`);
-
-    step = 6;
-    await notifyFunc?.(triggerSource, step);
-    await ribboonFunc?.(triggerSource, step);
-    await statusBarFunc?.(triggerSource, step, everythingOk);
-    let mixedEntityMappings = await ensembleMixedEnties(
-      localEntityList,
-      prevSyncEntityList,
-      remoteEntityList,
-      settings.syncConfigDir ?? false,
-      settings.syncBookmarks ?? false,
-      configDir,
-      settings.syncUnderscoreItems ?? false,
-      settings.ignorePaths ?? [],
-      settings.onlyAllowPaths ?? [],
-      fsEncrypt,
-      settings.serviceType,
-      profiler
-    );
-    profiler?.insert(`finish step${step} (build partial mixedEntity)`);
-
-    mixedEntityMappings = await getSyncPlanInplace(
-      mixedEntityMappings,
-      settings.skipSizeLargerThan ?? -1,
-      settings.conflictAction ?? "keep_newer",
-      settings.syncDirection ?? "bidirectional",
-      profiler,
-      settings,
-      triggerSource,
-      configDir
-    );
-    console.debug(`mixedEntityMappings:`);
-    console.debug(mixedEntityMappings); // for debugging
-    profiler?.insert("finish building full sync plan");
-
-    await insertSyncPlanRecordByVault(
-      db,
-      mixedEntityMappings,
-      vaultRandomID,
-      settings.serviceType
-    );
-    profiler?.insert("finish writing sync plan");
-    profiler?.insert(`finish step${step} (make plan)`);
-
-    // The operations above are almost read only and kind of safe.
-    // The operations below begins to write or delete (!!!) something.
-
-    step = 7;
-    if (triggerSource !== "dry") {
-      await notifyFunc?.(triggerSource, step);
-      await ribboonFunc?.(triggerSource, step);
-      await statusBarFunc?.(triggerSource, step, everythingOk);
-      await doActualSync(
-        mixedEntityMappings,
-        fsLocal,
-        fsEncrypt,
-        vaultRandomID,
-        profileID,
-        settings.concurrency ?? 5,
-        settings.protectModifyPercentage ?? 50,
-        getProtectModifyPercentageErrorStrFunc,
-        db,
-        profiler,
-        settings.conflictAction ?? "keep_newer",
-        triggerSource,
-        callbackSyncProcess
-      );
-      profiler?.insert(`finish step${step} (actual sync)`);
-    } else {
-      await notifyFunc?.(triggerSource, step);
-      await ribboonFunc?.(triggerSource, step);
-      await statusBarFunc?.(triggerSource, step, everythingOk);
-      profiler?.insert(
-        `finish step${step} (skip actual sync because of dry run)`
-      );
+    const listingPipeline = await runRemoteListingPipeline({
+      listingTimeoutMs:
+        settings.remoteListingTimeoutMilliseconds ??
+        DEFAULT_REMOTE_LISTING_TIMEOUT_MS,
+      listRemote: () => fsEncrypt.walk(),
+      listLocal: async () => {
+        profiler?.insert(`finish step${step} (list remote)`);
+        step = 4;
+        await notifyFunc?.(triggerSource, step);
+        await ribboonFunc?.(triggerSource, step);
+        await statusBarFunc?.(triggerSource, step, everythingOk);
+        const localEntityList = await fsLocal.walk();
+        profiler?.insert(`finish step${step} (list local)`);
+        return localEntityList;
+      },
+      readHistory: async () => {
+        step = 5;
+        await notifyFunc?.(triggerSource, step);
+        await ribboonFunc?.(triggerSource, step);
+        await statusBarFunc?.(triggerSource, step, everythingOk);
+        const prevSyncEntityList = await getAllPrevSyncRecordsByVaultAndProfile(
+          db,
+          vaultRandomID,
+          profileID
+        );
+        profiler?.insert(`finish step${step} (prev sync)`);
+        return prevSyncEntityList;
+      },
+      buildPlan: async (
+        remoteEntityList,
+        localEntityList,
+        prevSyncEntityList
+      ) => {
+        assertRemoteListingPlausible(
+          prevSyncEntityList,
+          remoteEntityList,
+          settings.syncDirection ?? "bidirectional",
+          settings.protectModifyPercentage ?? 50
+        );
+        step = 6;
+        await notifyFunc?.(triggerSource, step);
+        await ribboonFunc?.(triggerSource, step);
+        await statusBarFunc?.(triggerSource, step, everythingOk);
+        let mixedEntityMappings = await ensembleMixedEnties(
+          localEntityList,
+          prevSyncEntityList,
+          remoteEntityList,
+          settings.syncConfigDir ?? false,
+          settings.syncBookmarks ?? false,
+          configDir,
+          settings.syncUnderscoreItems ?? false,
+          settings.ignorePaths ?? [],
+          settings.onlyAllowPaths ?? [],
+          fsEncrypt,
+          settings.serviceType,
+          profiler
+        );
+        profiler?.insert(`finish step${step} (build partial mixedEntity)`);
+        mixedEntityMappings = await getSyncPlanInplace(
+          mixedEntityMappings,
+          settings.skipSizeLargerThan ?? -1,
+          targetedSync === undefined
+            ? settings.conflictAction ?? "keep_newer"
+            : "keep_newer",
+          targetedSync === undefined
+            ? settings.syncDirection ?? "bidirectional"
+            : "bidirectional",
+          profiler,
+          settings,
+          triggerSource,
+          configDir
+        );
+        if (targetedSync !== undefined) {
+          mixedEntityMappings = await prepareTargetedSyncPlan(
+            mixedEntityMappings,
+            targetedSync
+          );
+        }
+        console.debug(`mixedEntityMappings:`);
+        console.debug(mixedEntityMappings);
+        profiler?.insert("finish building full sync plan");
+        await insertSyncPlanRecordByVault(
+          db,
+          mixedEntityMappings,
+          vaultRandomID,
+          settings.serviceType
+        );
+        profiler?.insert("finish writing sync plan");
+        profiler?.insert(`finish step${step} (make plan)`);
+        return mixedEntityMappings;
+      },
+      applyWrites: async (mixedEntityMappings) => {
+        step = 7;
+        await notifyFunc?.(triggerSource, step);
+        await ribboonFunc?.(triggerSource, step);
+        await statusBarFunc?.(triggerSource, step, everythingOk);
+        if (triggerSource !== "dry") {
+          await doActualSync(
+            mixedEntityMappings,
+            fsLocal,
+            fsEncrypt,
+            vaultRandomID,
+            profileID,
+            settings.concurrency ?? 5,
+            settings.protectModifyPercentage ?? 50,
+            getProtectModifyPercentageErrorStrFunc,
+            db,
+            profiler,
+            targetedSync === undefined
+              ? settings.conflictAction ?? "keep_newer"
+              : "keep_newer",
+            triggerSource,
+            callbackSyncProcess
+          );
+          profiler?.insert(`finish step${step} (actual sync)`);
+          return;
+        }
+        profiler?.insert(
+          `finish step${step} (skip actual sync because of dry run)`
+        );
+      },
+    });
+    if (listingPipeline.outcome === "failure") {
+      throw listingPipeline.error;
     }
   } catch (error: any) {
     profiler?.insert("start error branch");
@@ -2110,4 +2129,5 @@ export async function syncer(
 
   console.info(`ending sync.`);
   markIsSyncingFunc(false);
+  return everythingOk;
 }

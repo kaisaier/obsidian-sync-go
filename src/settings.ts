@@ -30,7 +30,12 @@ import { generateOnedriveFullSettingsPart } from "../pro/src/settingsOnedriveFul
 import { generatePCloudSettingsPart } from "../pro/src/settingsPCloud";
 import { generateProSettingsPart } from "../pro/src/settingsPro";
 import { generateYandexDiskSettingsPart } from "../pro/src/settingsYandexDisk";
+import {
+  buildAutoSyncSettingsControlModel,
+  configureAutoRunDropdown,
+} from "./autoSyncSettingsControls";
 import { API_VER_ENSURE_REQURL_OK, VALID_REQURL } from "./baseTypesObs";
+import { copyTextToClipboard } from "./clipboard";
 import { messyConfigToNormal } from "./configPersist";
 import {
   exportVaultProfilerResultsToFiles,
@@ -447,8 +452,12 @@ class DropboxAuthModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_dropboxauth_copynotice"));
+          const copied = await copyTextToClipboard(authUrl);
+          new Notice(
+            copied
+              ? t("modal_dropboxauth_copynotice")
+              : t("clipboard_copy_failed")
+          );
         };
       }
     );
@@ -590,8 +599,12 @@ export class OnedriveAuthModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_onedriveauth_copynotice"));
+          const copied = await copyTextToClipboard(authUrl);
+          new Notice(
+            copied
+              ? t("modal_onedriveauth_copynotice")
+              : t("clipboard_copy_failed")
+          );
         };
       }
     );
@@ -771,8 +784,10 @@ class ExportSettingsQrCodeModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(rawUri);
-          new Notice(t("modal_qr_button_notice"));
+          const copied = await copyTextToClipboard(rawUri);
+          new Notice(
+            copied ? t("modal_qr_button_notice") : t("clipboard_copy_failed")
+          );
         };
       }
     );
@@ -2085,41 +2100,197 @@ export class RemotelySaveSettingTab extends PluginSettingTab {
           });
       });
 
+    const schedulerControls = buildAutoSyncSettingsControlModel(
+      this.plugin.settings,
+      Platform.isDesktopApp,
+      {
+        disabled: t("settings_autorun_disabled"),
+        minutes: (minutes) =>
+          t("settings_scheduler_minutes", { minutes: `${minutes}` }),
+        legacy: (minutes) =>
+          t("settings_autorun_legacy", { minutes: `${minutes}` }),
+        hour: (hour) =>
+          t("settings_scheduler_hour", {
+            hour: `${hour.toString().padStart(2, "0")}`,
+          }),
+      }
+    );
+
     new Setting(basicDiv)
       .setName(t("settings_autorun"))
       .setDesc(t("settings_autorun_desc"))
       .addDropdown((dropdown) => {
-        dropdown.addOption("-1", t("settings_autorun_notset"));
-        dropdown.addOption(`${1000 * 60 * 1}`, t("settings_autorun_1min"));
-        dropdown.addOption(`${1000 * 60 * 5}`, t("settings_autorun_5min"));
-        dropdown.addOption(`${1000 * 60 * 10}`, t("settings_autorun_10min"));
-        dropdown.addOption(`${1000 * 60 * 30}`, t("settings_autorun_30min"));
+        configureAutoRunDropdown(
+          dropdown,
+          schedulerControls,
+          async (intervalMs) => {
+            await this.plugin.applyNormalizedSettingsAndReschedule({
+              autoRunEveryMilliseconds: intervalMs,
+            });
+          }
+        );
+      });
 
+    new Setting(basicDiv)
+      .setName(t("settings_remote_listing_timeout"))
+      .setDesc(t("settings_remote_listing_timeout_desc"))
+      .addDropdown((dropdown) => {
+        for (const option of schedulerControls.remoteListingTimeoutOptions) {
+          dropdown.addOption(`${option.value}`, option.label);
+        }
         dropdown
-          .setValue(`${this.plugin.settings.autoRunEveryMilliseconds}`)
+          .setValue(`${schedulerControls.values.remoteListingTimeoutMilliseconds}`)
           .onChange(async (val: string) => {
-            const realVal = Number.parseInt(val);
-            this.plugin.settings.autoRunEveryMilliseconds = realVal;
-            await this.plugin.saveSettings();
-            if (
-              (realVal === undefined || realVal === null || realVal <= 0) &&
-              this.plugin.autoRunIntervalID !== undefined
-            ) {
-              // clear
-              window.clearInterval(this.plugin.autoRunIntervalID);
-              this.plugin.autoRunIntervalID = undefined;
-            } else if (
-              realVal !== undefined &&
-              realVal !== null &&
-              realVal > 0
-            ) {
-              const intervalID = window.setInterval(() => {
-                console.info("auto run from settings.ts");
-                this.plugin.syncRun("auto");
-              }, realVal);
-              this.plugin.autoRunIntervalID = intervalID;
-              this.plugin.registerInterval(intervalID);
-            }
+            await this.plugin.applyNormalizedSettingsAndReschedule({
+              remoteListingTimeoutMilliseconds: Number.parseInt(val),
+            });
+          });
+      });
+
+    if (schedulerControls.adaptiveControlsVisible) {
+      const nightDependentSettings: Setting[] = [];
+      const refreshNightControls = (enabled: boolean) => {
+        for (const setting of nightDependentSettings) {
+          setting.settingEl.style.display = enabled ? "" : "none";
+        }
+      };
+
+      new Setting(basicDiv)
+        .setName(t("settings_adaptive_night_enabled"))
+        .setDesc(t("settings_adaptive_night_enabled_desc"))
+        .addToggle((toggle) => {
+          toggle
+            .setValue(schedulerControls.values.autoRunNightEnabled)
+            .onChange(async (val) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunNightEnabled: val,
+              });
+              refreshNightControls(val);
+            });
+        });
+
+      const nightStartSetting = new Setting(basicDiv)
+        .setName(t("settings_adaptive_night_start"))
+        .addDropdown((dropdown) => {
+          for (const option of schedulerControls.hourOptions) {
+            dropdown.addOption(`${option.value}`, option.label);
+          }
+          dropdown
+            .setValue(`${schedulerControls.values.autoRunNightStartMinute}`)
+            .onChange(async (val: string) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunNightStartMinute: Number.parseInt(val),
+              });
+            });
+        });
+      nightDependentSettings.push(nightStartSetting);
+
+      const nightEndSetting = new Setting(basicDiv)
+        .setName(t("settings_adaptive_night_end"))
+        .addDropdown((dropdown) => {
+          for (const option of schedulerControls.hourOptions) {
+            dropdown.addOption(`${option.value}`, option.label);
+          }
+          dropdown
+            .setValue(`${schedulerControls.values.autoRunNightEndMinute}`)
+            .onChange(async (val: string) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunNightEndMinute: Number.parseInt(val),
+              });
+            });
+        });
+      nightDependentSettings.push(nightEndSetting);
+
+      const nightIntervalSetting = new Setting(basicDiv)
+        .setName(t("settings_adaptive_night_interval"))
+        .addDropdown((dropdown) => {
+          for (const option of schedulerControls.nightIntervalOptions) {
+            dropdown.addOption(`${option.value}`, option.label);
+          }
+          dropdown
+            .setValue(`${schedulerControls.values.autoRunNightIntervalMilliseconds}`)
+            .onChange(async (val: string) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunNightIntervalMilliseconds: Number.parseInt(val),
+              });
+            });
+        });
+      nightDependentSettings.push(nightIntervalSetting);
+      refreshNightControls(schedulerControls.nightDependentControlsVisible);
+
+      const inactivityDependentSettings: Setting[] = [];
+      const refreshInactivityControls = (enabled: boolean) => {
+        for (const setting of inactivityDependentSettings) {
+          setting.settingEl.style.display = enabled ? "" : "none";
+        }
+      };
+
+      new Setting(basicDiv)
+        .setName(t("settings_adaptive_inactivity_enabled"))
+        .setDesc(t("settings_adaptive_inactivity_enabled_desc"))
+        .addToggle((toggle) => {
+          toggle
+            .setValue(schedulerControls.values.autoRunInactivityEnabled)
+            .onChange(async (val) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunInactivityEnabled: val,
+              });
+              refreshInactivityControls(val);
+            });
+        });
+
+      const inactivityThresholdSetting = new Setting(basicDiv)
+        .setName(t("settings_adaptive_inactivity_threshold"))
+        .addDropdown((dropdown) => {
+          for (const option of schedulerControls.inactivityThresholdOptions) {
+            dropdown.addOption(`${option.value}`, option.label);
+          }
+          dropdown
+            .setValue(
+              `${schedulerControls.values.autoRunInactivityThresholdMilliseconds}`
+            )
+            .onChange(async (val: string) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunInactivityThresholdMilliseconds: Number.parseInt(val),
+              });
+            });
+        });
+      inactivityDependentSettings.push(inactivityThresholdSetting);
+
+      const inactivityIntervalSetting = new Setting(basicDiv)
+        .setName(t("settings_adaptive_inactivity_interval"))
+        .addDropdown((dropdown) => {
+          for (const option of schedulerControls.inactivityIntervalOptions) {
+            dropdown.addOption(`${option.value}`, option.label);
+          }
+          dropdown
+            .setValue(
+              `${schedulerControls.values.autoRunInactivityIntervalMilliseconds}`
+            )
+            .onChange(async (val: string) => {
+              await this.plugin.applyNormalizedSettingsAndReschedule({
+                autoRunInactivityIntervalMilliseconds: Number.parseInt(val),
+              });
+            });
+        });
+      inactivityDependentSettings.push(inactivityIntervalSetting);
+      refreshInactivityControls(
+        schedulerControls.inactivityDependentControlsVisible
+      );
+    }
+
+    new Setting(basicDiv)
+      .setName(t("settings_failure_backoff_enabled"))
+      .setDesc(t("settings_failure_backoff_desc"))
+      .addToggle((toggle) => {
+        toggle
+          .setValue(
+            schedulerControls.values.autoRunFailureBackoffEnabled
+          )
+          .onChange(async (val) => {
+            await this.plugin.applyNormalizedSettingsAndReschedule({
+              autoRunFailureBackoffEnabled: val,
+            });
           });
       });
 
@@ -2716,12 +2887,9 @@ export class RemotelySaveSettingTab extends PluginSettingTab {
               } else {
                 const copied = cloneDeep(parsed.result);
                 // new Notice(JSON.stringify(copied))
-                this.plugin.settings = Object.assign(
-                  {},
-                  this.plugin.settings,
-                  copied
-                );
-                this.plugin.saveSettings();
+                if (copied !== undefined) {
+                  await this.plugin.applyNormalizedSettingsAndReschedule(copied);
+                }
                 new Notice(
                   t("protocol_saveqr", {
                     manifestName: this.plugin.manifest.name,
@@ -2828,6 +2996,16 @@ export class RemotelySaveSettingTab extends PluginSettingTab {
     new Setting(debugDiv)
       .setName(t("settings_viewconsolelog"))
       .setDesc(stringToFragment(t("settings_viewconsolelog_desc")));
+
+    new Setting(debugDiv)
+      .setName(t("settings_viewsynclogs"))
+      .setDesc(t("settings_viewsynclogs_desc"))
+      .addButton(async (button) => {
+        button.setButtonText(t("settings_viewsynclogs_button"));
+        button.onClick(async () => {
+          this.plugin.openSyncLogModal();
+        });
+      });
 
     const debugDivExportSyncPlans = new Setting(debugDiv)
       .setName(t("settings_syncplans"))

@@ -16,6 +16,9 @@ import { codeVerifier2CodeChallenge } from "./oauth2";
 
 const site = PRO_WEBSITE;
 console.debug(`remotelysave official website: ${site}`);
+const LOCAL_PRO_EMAIL = "local-pro@obsidian-sync-go";
+const LOCAL_PRO_TOKEN = "local-pro-token";
+const LOCAL_PRO_EXPIRE_MS = 1000 * 60 * 60 * 24 * 365 * 10;
 
 export const DEFAULT_PRO_CONFIG: ProConfig = {
   accessToken: "",
@@ -26,146 +29,112 @@ export const DEFAULT_PRO_CONFIG: ProConfig = {
   email: "",
 };
 
+const ALL_PRO_FEATURES: PRO_FEATURE_TYPE[] = [
+  "feature-smart_conflict",
+  "feature-onedrive_full",
+  "feature-google_drive",
+  "feature-box",
+  "feature-pcloud",
+  "feature-yandex_disk",
+  "feature-koofr",
+  "feature-azure_blob_storage",
+];
+
+const getLocalEnabledProFeatures = (): FeatureInfo[] => {
+  const now = Date.now();
+  const expireAtTimeMs = now + LOCAL_PRO_EXPIRE_MS;
+  return ALL_PRO_FEATURES.map((featureName) => ({
+    featureName,
+    enableAtTimeMs: now as any,
+    expireAtTimeMs: expireAtTimeMs as any,
+  }));
+};
+
+const ensureLocalProConfigInplace = (config: ProConfig) => {
+  const now = Date.now();
+  config.accessToken = LOCAL_PRO_TOKEN;
+  config.refreshToken = LOCAL_PRO_TOKEN;
+  config.accessTokenExpiresInMs = LOCAL_PRO_EXPIRE_MS;
+  config.accessTokenExpiresAtTimeMs = now + LOCAL_PRO_EXPIRE_MS;
+  config.credentialsShouldBeDeletedAtTimeMs = now + LOCAL_PRO_EXPIRE_MS;
+  config.email = LOCAL_PRO_EMAIL;
+  config.enabledProFeatures = getLocalEnabledProFeatures();
+};
+
 export const generateAuthUrlAndCodeVerifierChallenge = async (
   hasCallback: boolean
 ) => {
-  const appKey = PRO_CLIENT_ID ?? "cli-"; // hard-code
   const codeVerifier = nanoid(128);
   const codeChallenge = await codeVerifier2CodeChallenge(codeVerifier);
-  let authUrl = `${site}/oauth2/authorize?response_type=code&client_id=${appKey}&token_access_type=offline&code_challenge_method=S256&code_challenge=${codeChallenge}&scope=pro.list.read`;
-  if (hasCallback) {
-    authUrl += `&redirect_uri=obsidian://${COMMAND_CALLBACK_PRO}`;
-  }
   return {
-    authUrl,
+    authUrl: "",
     codeVerifier,
     codeChallenge,
   };
 };
 
-export const sendAuthReq = async (
-  verifier: string,
-  authCode: string,
-  errorCallBack: any
-) => {
-  const appKey = PRO_CLIENT_ID ?? "cli-"; // hard-code
-  try {
-    const k = {
-      code: authCode,
-      grant_type: "authorization_code",
-      code_verifier: verifier,
-      client_id: appKey,
-      // redirect_uri: `obsidian://${COMMAND_CALLBACK_PRO}`,
-      scope: "pro.list.read",
-    };
-    // console.debug(k);
-    const resp1 = await fetch(`${site}/api/v1/oauth2/token`, {
-      method: "POST",
-      body: new URLSearchParams(k),
-    });
-    const resp2 = await resp1.json();
-    return resp2;
-  } catch (e) {
-    console.error(e);
-    if (errorCallBack !== undefined) {
-      await errorCallBack(e);
-    }
-  }
-};
-
-export const sendRefreshTokenReq = async (refreshToken: string) => {
-  const appKey = PRO_CLIENT_ID ?? "cli-"; // hard-code
-  try {
-    console.info("start auto getting refreshed Remotely Save access token.");
-    const resp1 = await fetch(`${site}/api/v1/oauth2/token`, {
-      method: "POST",
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: appKey,
-        scope: "pro.list.read",
-      }),
-    });
-    const resp2: AuthResError | AuthResSucc = await resp1.json();
-    console.info("finish auto getting refreshed Remotely Save access token.");
-    return resp2;
-  } catch (e) {
-    console.error(e);
-    throw e;
-  }
-};
-
-interface AuthResError {
+export interface AuthResError {
   error: "invalid_request";
 }
 
-interface AuthResSucc {
+export interface AuthResSucc {
   error: undefined; // needed for typescript
   refresh_token?: string;
   access_token: string;
   expires_in: number;
 }
 
+export const sendAuthReq = async (
+  verifier: string,
+  authCode: string,
+  errorCallBack: any
+): Promise<AuthResError | AuthResSucc> => {
+  try {
+    return {
+      error: undefined,
+      access_token: LOCAL_PRO_TOKEN,
+      refresh_token: LOCAL_PRO_TOKEN,
+      expires_in: LOCAL_PRO_EXPIRE_MS / 1000,
+    } as AuthResSucc;
+  } catch (e) {
+    console.error(e);
+    if (errorCallBack !== undefined) {
+      await errorCallBack(e);
+    }
+    return { error: "invalid_request" };
+  }
+};
+
+export const sendRefreshTokenReq = async (refreshToken: string) => {
+  try {
+    return {
+      error: undefined,
+      access_token: LOCAL_PRO_TOKEN,
+      refresh_token: LOCAL_PRO_TOKEN,
+      expires_in: LOCAL_PRO_EXPIRE_MS / 1000,
+    } as AuthResSucc;
+  } catch (e) {
+    console.error(e);
+    throw e;
+  }
+};
+
 export const setConfigBySuccessfullAuthInplace = async (
   config: ProConfig,
   authRes: AuthResError | AuthResSucc,
   saveUpdatedConfigFunc: () => Promise<any> | undefined
 ) => {
-  if (authRes.error !== undefined) {
-    throw Error(
-      `remotely save account auth failed, please auth again: ${authRes.error}`
-    );
-  }
-
-  config.accessToken = authRes.access_token;
-  config.accessTokenExpiresAtTimeMs =
-    Date.now() + authRes.expires_in * 1000 - 5 * 60 * 1000;
-  config.accessTokenExpiresInMs = authRes.expires_in * 1000;
-  config.refreshToken = authRes.refresh_token || config.refreshToken;
-
-  // manually set it expired after 80 days;
-  config.credentialsShouldBeDeletedAtTimeMs =
-    Date.now() + OAUTH2_FORCE_EXPIRE_MILLISECONDS;
-
+  ensureLocalProConfigInplace(config);
   await saveUpdatedConfigFunc?.();
-
-  console.info(
-    "finish updating local info of Remotely Save official website token"
-  );
 };
 
 export const getAccessToken = async (
   config: ProConfig,
   saveUpdatedConfigFunc: () => Promise<any> | undefined
 ) => {
-  const ts = Date.now();
-  if (
-    config.accessToken !== undefined &&
-    config.accessToken !== "" &&
-    config.accessTokenExpiresAtTimeMs > ts &&
-    (config.credentialsShouldBeDeletedAtTimeMs ?? ts + 1000 * 1000) > ts
-  ) {
-    return config.accessToken;
-  }
-
-  console.debug(
-    `currently, accessToken=${config.accessToken}, accessTokenExpiresAtTimeMs=${
-      config.accessTokenExpiresAtTimeMs
-    }, credentialsShouldBeDeletedAtTimeMs=${
-      config.credentialsShouldBeDeletedAtTimeMs
-    },comp1=${config.accessTokenExpiresAtTimeMs > ts}, comp2=${
-      (config.credentialsShouldBeDeletedAtTimeMs ?? ts + 1000 * 1000) > ts
-    }`
-  );
-
-  // try to get it again??
-  const res = await sendRefreshTokenReq(config.refreshToken ?? "refresh-");
-  await setConfigBySuccessfullAuthInplace(config, res, saveUpdatedConfigFunc);
-
-  if (res.error !== undefined) {
-    throw Error("cannot update accessToken");
-  }
-  return res.access_token;
+  ensureLocalProConfigInplace(config);
+  await saveUpdatedConfigFunc?.();
+  return config.accessToken;
 };
 
 export const getAndSaveProFeatures = async (
@@ -173,22 +142,11 @@ export const getAndSaveProFeatures = async (
   pluginVersion: string,
   saveUpdatedConfigFunc: () => Promise<any> | undefined
 ) => {
-  const access = await getAccessToken(config, saveUpdatedConfigFunc);
-
-  const resp1 = await fetch(`${site}/api/v1/pro/list`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${access}`,
-      "REMOTELYSAVE-API-Plugin-Ver": pluginVersion,
-    },
-  });
-  const rsp2: {
-    proFeatures: FeatureInfo[];
-  } = await resp1.json();
-
-  config.enabledProFeatures = rsp2.proFeatures;
+  ensureLocalProConfigInplace(config);
   await saveUpdatedConfigFunc?.();
-  return rsp2;
+  return {
+    proFeatures: config.enabledProFeatures,
+  };
 };
 
 export const getAndSaveProEmail = async (
@@ -196,22 +154,11 @@ export const getAndSaveProEmail = async (
   pluginVersion: string,
   saveUpdatedConfigFunc: () => Promise<any> | undefined
 ) => {
-  const access = await getAccessToken(config, saveUpdatedConfigFunc);
-
-  const resp1 = await fetch(`${site}/api/v1/profile/list`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${access}`,
-      "REMOTELYSAVE-API-Plugin-Ver": pluginVersion,
-    },
-  });
-  const rsp2: {
-    email: string;
-  } = await resp1.json();
-
-  config.email = rsp2.email;
+  ensureLocalProConfigInplace(config);
   await saveUpdatedConfigFunc?.();
-  return rsp2;
+  return {
+    email: config.email ?? LOCAL_PRO_EMAIL,
+  };
 };
 
 /**
@@ -224,107 +171,10 @@ export const checkProRunnableAndFixInplace = async (
   saveUpdatedConfigFunc: () => Promise<any> | undefined
 ): Promise<true> => {
   console.debug(`checkProRunnableAndFixInplace`);
-
-  // many checks if status is valid
-
-  // no account
-  if (config.pro === undefined || config.pro.refreshToken === undefined) {
-    throw Error(`you need to "connect" to your account to use PRO features`);
+  if (config.pro === undefined) {
+    config.pro = { ...DEFAULT_PRO_CONFIG };
   }
-
-  // every features should have at most 40 days expiration dates
-  // and if the time has expired, we also check
-  const msIn40Days = 1000 * 60 * 60 * 24 * 40;
-  for (const f of config.pro.enabledProFeatures) {
-    const tooFarInTheFuture = f.expireAtTimeMs >= Date.now() + msIn40Days;
-    const alreadyExpired = f.expireAtTimeMs <= Date.now();
-    if (tooFarInTheFuture || alreadyExpired) {
-      console.info(
-        `the pro feature is too far in the future and has expired, check again.`
-      );
-      await getAndSaveProFeatures(
-        config.pro,
-        pluginVersion,
-        saveUpdatedConfigFunc
-      );
-      break;
-    }
-  }
-
-  const errorMsgs = [];
-
-  // check for smart_conflict
-  if (config.conflictAction === "smart_conflict") {
-    if (
-      config.pro.enabledProFeatures.filter(
-        (x) => x.featureName === "feature-smart_conflict"
-      ).length === 1
-    ) {
-      // good to go
-    } else {
-      errorMsgs.push(
-        `You're trying to use "smart conflict" PRO feature but you haven't subscribe to it.`
-      );
-    }
-  } else {
-    // good to go
-  }
-
-  const toChecked: {
-    feature: PRO_FEATURE_TYPE;
-    service: SUPPORTED_SERVICES_TYPE;
-    name: string;
-  }[] = [
-    {
-      feature: "feature-google_drive",
-      service: "googledrive",
-      name: "Google Drive",
-    },
-    {
-      feature: "feature-onedrive_full",
-      service: "onedrivefull",
-      name: "Onedrive (Full)",
-    },
-    { feature: "feature-box", service: "box", name: "Box" },
-    { feature: "feature-pcloud", service: "pcloud", name: "pCloud" },
-    {
-      feature: "feature-yandex_disk",
-      service: "yandexdisk",
-      name: "Yandex Disk",
-    },
-    {
-      feature: "feature-koofr",
-      service: "koofr",
-      name: "Koofr",
-    },
-    {
-      feature: "feature-azure_blob_storage",
-      service: "azureblobstorage",
-      name: "Azure Blob Storage",
-    },
-  ];
-
-  for (const { feature, service, name } of toChecked) {
-    console.debug(`checking "${feature}", serviceType=${config.serviceType}`);
-    if (config.serviceType === service) {
-      if (
-        config.pro.enabledProFeatures.filter((x) => x.featureName === feature)
-          .length === 1
-      ) {
-        // good to go
-      } else {
-        errorMsgs.push(
-          `You're trying to use "sync with ${name}" PRO feature but you haven't subscribe to it.`
-        );
-      }
-    } else {
-      // good to go
-    }
-  }
-
-  if (errorMsgs.length !== 0) {
-    throw Error(errorMsgs.join("\n\n"));
-  }
-
+  ensureLocalProConfigInplace(config.pro);
+  await saveUpdatedConfigFunc?.();
   return true;
 };

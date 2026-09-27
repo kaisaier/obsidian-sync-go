@@ -1,12 +1,10 @@
-# Remotely Save
+# obsidian-sync-go
 
 [English](./README.md) | 中文
 
-这是Obsidian的一个非官方同步插件。如果你喜欢它或觉得它帮到了你，请考虑在Github上给它一颗[星星 ![GitHub Repo stars](https://img.shields.io/github/stars/fyears/remotely-save?style=social)](https://github.com/fyears/remotely-save)。
+这是一个用于本地开发和私用的 Obsidian 同步插件 fork。
 
-[![BuildCI](https://github.com/fyears/remotely-save/actions/workflows/auto-build.yml/badge.svg)](https://github.com/fyears/remotely-save/actions/workflows/auto-build.yml)
-
-[![最新版本的下载量](https://img.shields.io/github/downloads-pre/remotely-save/remotely-save/latest/main.js?sort=semver)](https://github.com/fyears/remotely-save/releases)
+它基于 Remotely Save 代码库改造而来，并在这个 fork 中加入了更适合自用场景的调整，比如本地启用 PRO，以及去掉托管账号入口。
 
 ## 免责声明
 
@@ -53,20 +51,16 @@
 
 ## 问题、建议或错误
 
-非常欢迎你提出问题、发布任何建议或报告任何错误！该项目主要在GitHub上维护：
+这个 fork 的开发维护以当前 GitHub 仓库为准：
 
-- 问题：[GitHub 仓库讨论](https://github.com/remotely-save/remotely-save/discussions)
-- 建议：也在[GitHub 仓库讨论](https://github.com/remotely-save/remotely-save/discussions)
-- 错误：[GitHub 仓库 Issue](https://github.com/remotely-save/remotely-save/issues)（注意这里是 bug 反馈，不是讨论）
+- 仓库地址：[kaisaier/obsidian-sync-go](https://github.com/kaisaier/obsidian-sync-go)
 
-此外，插件作者可能会偶尔访问 Obsidian 官方论坛和官方 Discord 服务器，并关注与该插件相关的信息。
+如果你后续要继续私有维护或同步到 GitHub，就以这个仓库作为主线。
 
 ## 下载和安装
 
-- 选项 #1：在官方“社区插件列表”中搜索，或访问此链接：[https://obsidian.md/plugins?id=remotely-save](https://obsidian.md/plugins?id=remotely-save)（应该会重定向到 Obsidian app），然后安装插件。
-- 选项 #2：你也可以使用 [Obsidian42 - BRAT](https://github.com/TfTHacker/obsidian42-brat) 来安装此插件。在 BRAT 的配置中输入 `remotely-save/remotely-save`。
-- 选项 #3：[![GitHub release (latest by SemVer and asset including pre-releases)](https://img.shields.io/github/downloads-pre/fyears/remotely-save/latest/main.js?sort=semver)](https://github.com/fyears/remotely-save/releases) 从最新发布中手动下载文件（`main.js`，`manifest.json`，`styles.css`）。
-- 选项 #4：[![BuildCI](https://github.com/fyears/remotely-save/actions/workflows/auto-build.yml/badge.svg)](https://github.com/fyears/remotely-save/actions/workflows/auto-build.yml) 每个成功的构建的“摘要”下都有构建文件。它是由每个提交自动生成的，可能不会正常工作。
+- 选项 #1：在本仓库本地构建后，把 `main.js`、`manifest.json`、`styles.css` 复制到你的 vault 的 `.obsidian/plugins/obsidian-sync-go/` 目录。
+- 选项 #2：把这个 fork 推到你自己的 GitHub，然后按你自己的 release 或私有 BRAT 源方式安装。
 
 ## 使用方法
 
@@ -173,9 +167,12 @@ PRO（付费）功能“智能冲突”为用户提供了另一个选项：合�
 
 ## 定时自动同步
 
-- 你可以在设置中配置每 N 分钟自动同步。
-- 在自动同步模式下，如果发生任何错误，插件会**静默失败**。
-- 自动同步仅在 Obsidian 打开时有效。由于插件仅在 Obsidian 提供的浏览器环境中工作，因此**技术上不可能**在 Obsidian 后台自动同步。
+- 基础定时同步可以禁用，也可以设为每 5、10、15、30、60、120 或 240 分钟。已有的其他正数间隔会作为带标签的旧版当前值保留。
+- 桌面端的夜间策略默认关闭；开启后，默认在本地时间 23:00 至 07:00 将定时同步放慢为每 120 分钟一次。无操作策略也默认关闭；开启后，默认在 Obsidian 中连续 30 分钟没有键盘、指针、滚轮或窗口聚焦操作时，将定时同步放慢为每 60 分钟一次。
+- 多个策略同时生效时采用最长间隔。连续自动同步失败默认会让间隔逐次加倍，上限为 4 小时；同步成功、手动同步或恢复 Obsidian 操作会重置退避。
+- 手动同步和保存时同步会立即运行，不受夜间、无操作或失败退避延迟影响；启动时同步也不受自适应延迟影响。每次实际完成且非忙碌跳过的同步，都会从完成时间重新计算下一次定时同步。
+- 完整远端文件清单的超时可设为 2、5、10、20、30 或 60 分钟，默认 10 分钟；它不会改变单独的 120 秒密码检查。超时会在本地扫描、生成计划或写入之前让本次同步失败。由于超时无法取消已交给服务商库的请求，底层服务商 I/O 可能仍在后台继续（detached）。
+- 定时同步仅在 Obsidian 打开时有效；自动同步错误会**静默失败**。
 
 ## 保存时同步
 

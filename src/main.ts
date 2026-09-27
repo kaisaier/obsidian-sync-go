@@ -6,12 +6,14 @@ import { FileText, RefreshCcw, RotateCcw, createElement } from "lucide";
 import {
   Events,
   FileSystemAdapter,
+  ItemView,
   type Modal,
   Notice,
   Platform,
   Plugin,
   type Setting,
   TFolder,
+  WorkspaceLeaf,
   addIcon,
   requireApiVersion,
   setIcon,
@@ -63,6 +65,23 @@ import {
   setConfigBySuccessfullAuthInplace as setConfigBySuccessfullAuthInplaceYandexDisk,
 } from "../pro/src/fsYandexDisk";
 import { syncer } from "../pro/src/sync";
+import {
+  type AutoSyncPolicy,
+  CompletionAwareAutoSyncScheduler,
+  DEFAULT_INACTIVITY_INTERVAL_MS,
+  DEFAULT_INACTIVITY_THRESHOLD_MS,
+  DEFAULT_NIGHT_END_MINUTE,
+  DEFAULT_NIGHT_INTERVAL_MS,
+  DEFAULT_NIGHT_START_MINUTE,
+  DEFAULT_REMOTE_LISTING_TIMEOUT_MS,
+  type SyncOutcome,
+  applyNormalizedSettingsReplacement,
+  beginSyncInvocation,
+  createAutoSyncPolicy,
+  installAdaptiveActivityListeners,
+  normalizeAutoSyncSettings,
+  runSyncWithSettlement,
+} from "./autoSyncScheduler";
 import type {
   RemotelySavePluginSettings,
   SyncTriggerSourceType,
@@ -99,9 +118,11 @@ import { importQrCodeUri } from "./importExport";
 import {
   type InternalDBs,
   clearAllLoggerOutputRecords,
+  clearExpiredSyncLogRecords,
   clearExpiredSyncPlanRecords,
   getLastFailedSyncTimeByVault,
   getLastSuccessSyncTimeByVault,
+  insertSyncLogRecordByVault,
   prepareDBs,
   upsertLastFailedSyncTimeByVault,
   upsertLastSuccessSyncTimeByVault,
@@ -111,6 +132,9 @@ import { changeMobileStatusBar } from "./misc";
 import { DEFAULT_PROFILER_CONFIG, Profiler } from "./profiler";
 import { RemotelySaveSettingTab } from "./settings";
 import { SyncAlgoV3Modal } from "./syncAlgoV3Notice";
+import { SYNC_LOG_VIEW_TYPE, SyncLogModal, SyncLogView } from "./syncLog";
+import type { TargetedSyncRequest } from "./targetedSync";
+import { registerTargetedPushFileMenu } from "./targetedPushUi";
 
 const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   s3: DEFAULT_S3_CONFIG,
@@ -132,6 +156,15 @@ const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   autoRunEveryMilliseconds: -1,
   initRunAfterMilliseconds: -1,
   syncOnSaveAfterMilliseconds: -1,
+  remoteListingTimeoutMilliseconds: DEFAULT_REMOTE_LISTING_TIMEOUT_MS,
+  autoRunNightEnabled: false,
+  autoRunNightStartMinute: DEFAULT_NIGHT_START_MINUTE,
+  autoRunNightEndMinute: DEFAULT_NIGHT_END_MINUTE,
+  autoRunNightIntervalMilliseconds: DEFAULT_NIGHT_INTERVAL_MS,
+  autoRunInactivityEnabled: false,
+  autoRunInactivityThresholdMilliseconds: DEFAULT_INACTIVITY_THRESHOLD_MS,
+  autoRunInactivityIntervalMilliseconds: DEFAULT_INACTIVITY_INTERVAL_MS,
+  autoRunFailureBackoffEnabled: true,
   agreeToUploadExtraMetadata: true, // as of 20240106, it's safe to assume every new user agrees with this
   concurrency: 5,
   syncConfigDir: false,
@@ -224,14 +257,110 @@ export default class RemotelySavePlugin extends Plugin {
   currSyncMsg?: string;
   syncRibbon?: HTMLElement;
   autoRunIntervalID?: number;
+  autoSyncScheduler?: CompletionAwareAutoSyncScheduler;
   syncOnSaveIntervalID?: number;
   i18n!: I18n;
   vaultRandomID!: string;
   debugServerTemp?: string;
   syncEvent?: Events;
   appContainerObserver?: MutationObserver;
+  currSyncLogLines!: string[];
+  currSyncLogStartTs?: number;
+  currSyncStatusText?: string;
 
-  async syncRun(triggerSource: SyncTriggerSourceType = "manual") {
+  triggerSyncLogRefresh() {
+    this.syncEvent?.trigger("SYNC_LOG_REFRESH");
+  }
+
+  setCurrentSyncStatus(text?: string) {
+    this.currSyncStatusText = text;
+    this.triggerSyncLogRefresh();
+  }
+
+  appendSyncLogLine(message: string) {
+    const ts = new Date().toLocaleTimeString(navigator.language, {
+      hour12: false,
+    });
+    this.currSyncLogLines.push(`[${ts}] ${message}`);
+    this.triggerSyncLogRefresh();
+  }
+
+  async persistCurrentSyncLog(
+    triggerSource: SyncTriggerSourceType,
+    success: boolean
+  ) {
+    const durationMs =
+      this.currSyncLogStartTs === undefined
+        ? undefined
+        : Date.now() - this.currSyncLogStartTs;
+    const durationText =
+      durationMs === undefined ? "" : ` · ${Math.round(durationMs / 1000)}s`;
+    const summary = success
+      ? `Sync succeeded (${triggerSource})${durationText}`
+      : `Sync failed (${triggerSource})${durationText}`;
+    await insertSyncLogRecordByVault(
+      this.db,
+      this.vaultRandomID,
+      this.settings.serviceType,
+      triggerSource,
+      success,
+      summary,
+      this.currSyncLogLines.slice()
+    );
+  }
+
+  openSyncLogModal() {
+    new SyncLogModal(this).open();
+  }
+
+  async activateSyncLogView() {
+    const leaves = this.app.workspace.getLeavesOfType(SYNC_LOG_VIEW_TYPE);
+    let leaf = leaves[0] ?? null;
+    if (leaf === null) {
+      const rightLeaf = this.app.workspace.getRightLeaf(false);
+      if (rightLeaf === null) {
+        this.openSyncLogModal();
+        return;
+      }
+      leaf = rightLeaf;
+      await leaf.setViewState({
+        type: SYNC_LOG_VIEW_TYPE,
+        active: true,
+      });
+    }
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  async syncRun(
+    triggerSource: SyncTriggerSourceType = "manual",
+    targetedSync?: TargetedSyncRequest
+  ): Promise<SyncOutcome> {
+    const admission = beginSyncInvocation({
+      trigger: triggerSource,
+      isBusy: () => this.isSyncing,
+      recordInvocation: (trigger) =>
+        this.autoSyncScheduler?.recordInvocation(trigger),
+      start: () => {
+        this.currSyncLogLines = [];
+        this.currSyncLogStartTs = Date.now();
+        this.appendSyncLogLine(`Sync started. trigger=${triggerSource}`);
+      },
+    });
+    if (admission === "skipped-busy") {
+      if (triggerSource === "manual" || triggerSource === "dry") {
+        new Notice(
+          this.i18n.t("syncrun_alreadyrunning", {
+            pluginName: this.manifest.name,
+            syncStatus: "running",
+            newTriggerSource: triggerSource,
+          })
+        );
+        if (this.currSyncMsg !== undefined && this.currSyncMsg !== "") {
+          new Notice(this.currSyncMsg);
+        }
+      }
+      return "skipped-busy";
+    }
     let profiler: Profiler | undefined = undefined;
     if (this.settings.profiler?.enable ?? false) {
       profiler = new Profiler(
@@ -294,6 +423,8 @@ export default class RemotelySavePlugin extends Plugin {
     };
 
     const notifyFunc = async (s: SyncTriggerSourceType, step: number) => {
+      let logMsg = "";
+      let phaseText = "";
       switch (step) {
         case 0:
           if (s === "dry") {
@@ -303,6 +434,8 @@ export default class RemotelySavePlugin extends Plugin {
               getNotice(s, t("syncrun_step0"));
             }
           }
+          logMsg = s === "dry" ? t("syncrun_shortstep0") : "";
+          phaseText = t("sync_log_status_dry_run");
 
           break;
 
@@ -322,6 +455,10 @@ export default class RemotelySavePlugin extends Plugin {
               })
             );
           }
+          logMsg = t("syncrun_step1", {
+            serviceType: this.settings.serviceType,
+          });
+          phaseText = t("sync_log_status_preparing");
           break;
 
         case 2:
@@ -330,6 +467,8 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step2"));
           }
+          logMsg = t("syncrun_step2");
+          phaseText = t("sync_log_status_checking_password");
           break;
 
         case 3:
@@ -338,6 +477,8 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step3"));
           }
+          logMsg = t("syncrun_step3");
+          phaseText = t("sync_log_status_listing_remote");
           break;
 
         case 4:
@@ -346,6 +487,8 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step4"));
           }
+          logMsg = t("syncrun_step4");
+          phaseText = t("sync_log_status_hashing_local");
           break;
 
         case 5:
@@ -354,6 +497,8 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step5"));
           }
+          logMsg = t("syncrun_step5");
+          phaseText = t("sync_log_status_reading_history");
           break;
 
         case 6:
@@ -362,6 +507,8 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step6"));
           }
+          logMsg = t("syncrun_step6");
+          phaseText = t("sync_log_status_generating_plan");
           break;
 
         case 7:
@@ -378,6 +525,11 @@ export default class RemotelySavePlugin extends Plugin {
               getNotice(s, t("syncrun_step7"));
             }
           }
+          logMsg = s === "dry" ? t("syncrun_step7skip") : t("syncrun_step7");
+          phaseText =
+            s === "dry"
+              ? t("sync_log_status_dry_run")
+              : t("sync_log_status_syncing");
           break;
 
         case 8:
@@ -386,17 +538,26 @@ export default class RemotelySavePlugin extends Plugin {
           } else {
             getNotice(s, t("syncrun_step8"));
           }
+          logMsg = t("syncrun_step8");
+          phaseText = t("sync_log_status_finished");
           break;
 
         default:
           throw Error(`unknown step=${step} for showing notice`);
       }
+      this.setCurrentSyncStatus(phaseText);
+      if (logMsg !== "") {
+        this.appendSyncLogLine(logMsg);
+      }
     };
 
     const errNotifyFunc = async (s: SyncTriggerSourceType, error: Error) => {
       console.error(error);
+      this.setCurrentSyncStatus(t("sync_log_status_failed"));
+      this.appendSyncLogLine(`ERROR: ${error?.message ?? "unknown error"}`);
       if (error instanceof AggregateError) {
         for (const e of error.errors) {
+          this.appendSyncLogLine(`ERROR ITEM: ${e.message}`);
           getNotice(s, e.message, 10 * 1000);
         }
       } else {
@@ -447,6 +608,11 @@ export default class RemotelySavePlugin extends Plugin {
 
     const markIsSyncingFunc = async (isSyncing: boolean) => {
       this.isSyncing = isSyncing;
+      if (!isSyncing) {
+        this.setCurrentSyncStatus(undefined);
+      } else {
+        this.triggerSyncLogRefresh();
+      }
     };
 
     const callbackSyncProcess = async (
@@ -456,6 +622,9 @@ export default class RemotelySavePlugin extends Plugin {
       pathName: string,
       decision: string
     ) => {
+      this.appendSyncLogLine(
+        `SYNC ${realCounter}/${realTotalCount} | ${decision} | ${pathName}`
+      );
       this.setCurrSyncMsg(
         t,
         s,
@@ -465,52 +634,88 @@ export default class RemotelySavePlugin extends Plugin {
         decision,
         triggerSource
       );
-    };
-
-    if (this.isSyncing) {
-      getNotice(
-        triggerSource,
-        t("syncrun_alreadyrunning", {
-          pluginName: this.manifest.name,
-          syncStatus: "running",
-          newTriggerSource: triggerSource,
+      this.setCurrentSyncStatus(
+        t("sync_log_status_syncing_progress", {
+          done: Math.min(realCounter + 1, realTotalCount),
+          total: realTotalCount,
         })
       );
-
-      if (this.currSyncMsg !== undefined && this.currSyncMsg !== "") {
-        getNotice(triggerSource, this.currSyncMsg);
-      }
-      return;
-    }
+    };
 
     const configSaver = async () => await this.saveSettings();
 
-    await syncer(
-      fsLocal,
-      fsRemote,
-      fsEncrypt,
-      profiler,
-      this.db,
-      triggerSource,
-      profileID,
-      this.vaultRandomID,
-      this.app.vault.configDir,
-      this.settings,
-      this.manifest.version,
-      configSaver,
-      getProtectError,
-      markIsSyncingFunc,
-      notifyFunc,
-      errNotifyFunc,
-      ribboonFunc,
-      statusBarFunc,
-      callbackSyncProcess
-    );
-
-    fsEncrypt.closeResources();
-    (profiler as Profiler | undefined)?.clear();
-
-    this.syncEvent?.trigger("SYNC_DONE");
+    const outcome = await runSyncWithSettlement({
+      runSync: async () =>
+        await syncer(
+          fsLocal,
+          fsRemote,
+          fsEncrypt,
+          profiler,
+          this.db,
+          triggerSource,
+          profileID,
+          this.vaultRandomID,
+          this.app.vault.configDir,
+          this.settings,
+          this.manifest.version,
+          configSaver,
+          getProtectError,
+          markIsSyncingFunc,
+          notifyFunc,
+          errNotifyFunc,
+          ribboonFunc,
+          statusBarFunc,
+          callbackSyncProcess,
+          targetedSync
+        ),
+      settlementSteps: (successful) => [
+        {
+          label: "append sync completion log",
+          run: () => {
+            this.appendSyncLogLine(
+              successful
+                ? "Sync finished successfully."
+                : "Sync finished with errors."
+            );
+          },
+        },
+        {
+          label: "persist sync log",
+          run: async () =>
+            await this.persistCurrentSyncLog(triggerSource, successful),
+        },
+        {
+          label: "close sync resources",
+          run: () => fsEncrypt.closeResources(),
+        },
+        {
+          label: "clear sync profiler",
+          run: () => {
+            profiler?.clear();
+          },
+        },
+        {
+          label: "trigger sync done",
+          run: () => this.syncEvent?.trigger("SYNC_DONE"),
+        },
+        {
+          label: "clear sync busy state",
+          run: () => {
+            this.isSyncing = false;
+            this.setCurrentSyncStatus(undefined);
+          },
+        },
+      ],
+      reportError: (error) => console.error(error),
+    });
+    if (triggerSource !== "auto") {
+      this.autoSyncScheduler?.recordCompletion({
+        trigger: triggerSource,
+        outcome,
+        completedAtMs: Date.now(),
+      });
+    }
+    return outcome;
   }
 
   async onload() {
@@ -533,10 +738,19 @@ export default class RemotelySavePlugin extends Plugin {
     this.currSyncMsg = "";
     this.isSyncing = false;
     this.hasPendingSyncOnSave = false;
+    this.currSyncLogLines = [];
+    this.currSyncLogStartTs = undefined;
+    this.currSyncStatusText = undefined;
 
     this.syncEvent = new Events();
 
     await this.loadSettings();
+    this.enableAdaptiveActivityTracking();
+
+    this.registerView(
+      SYNC_LOG_VIEW_TYPE,
+      (leaf) => new SyncLogView(leaf, this)
+    );
 
     // MUST after loadSettings and before prepareDB
     const profileID: string = this.getCurrProfileID();
@@ -591,8 +805,9 @@ export default class RemotelySavePlugin extends Plugin {
       } else {
         const copied = cloneDeep(parsed.result);
         // new Notice(JSON.stringify(copied))
-        this.settings = Object.assign({}, this.settings, copied);
-        this.saveSettings();
+        if (copied !== undefined) {
+          await this.applyNormalizedSettingsAndReschedule(copied);
+        }
         new Notice(
           t("protocol_saveqr", {
             manifestName: this.manifest.name,
@@ -1185,6 +1400,10 @@ export default class RemotelySavePlugin extends Plugin {
       const statusBarItem = this.addStatusBarItem();
       this.statusBarElement = statusBarItem.createEl("span");
       this.statusBarElement.setAttribute("data-tooltip-position", "top");
+      this.statusBarElement.addClass("sync-log-status-clickable");
+      this.statusBarElement.onclick = async () => {
+        await this.activateSyncLogView();
+      };
 
       if (!this.isSyncing) {
         this.updateLastSyncMsg(
@@ -1225,6 +1444,19 @@ export default class RemotelySavePlugin extends Plugin {
       callback: async () => {
         this.syncRun("dry");
       },
+    });
+
+    this.addCommand({
+      id: "view-sync-logs",
+      name: t("command_viewsynclogs"),
+      icon: iconNameLogs,
+      callback: async () => {
+        await this.activateSyncLogView();
+      },
+    });
+
+    this.addRibbonIcon(iconNameLogs, t("command_viewsynclogs"), () => {
+      this.activateSyncLogView();
     });
 
     this.addCommand({
@@ -1298,6 +1530,7 @@ export default class RemotelySavePlugin extends Plugin {
     // });
 
     this.enableCheckingFileStat();
+    registerTargetedPushFileMenu(this);
 
     if (!this.settings.agreeToUseSyncV3) {
       const syncAlgoV3Modal = new SyncAlgoV3Modal(this.app, this);
@@ -1318,6 +1551,7 @@ export default class RemotelySavePlugin extends Plugin {
 
   async onunload() {
     console.info(`unloading plugin ${this.manifest.id}`);
+    this.stopAutoSyncScheduler();
     this.syncRibbon = undefined;
     if (this.appContainerObserver !== undefined) {
       this.appContainerObserver.disconnect();
@@ -1341,6 +1575,10 @@ export default class RemotelySavePlugin extends Plugin {
       cloneDeep(DEFAULT_SETTINGS),
       messyConfigToNormal(await this.loadData())
     );
+    this.settings = {
+      ...this.settings,
+      ...normalizeAutoSyncSettings(this.settings),
+    };
 
     if (this.settings.syncBookmarks === undefined) {
       this.settings.syncBookmarks = false;
@@ -1516,6 +1754,20 @@ export default class RemotelySavePlugin extends Plugin {
     } else {
       await this.saveData(this.settings);
     }
+  }
+
+  async applyNormalizedSettingsAndReschedule(
+    replacement: Partial<RemotelySavePluginSettings>
+  ) {
+    this.settings = await applyNormalizedSettingsReplacement(
+      this.settings,
+      replacement,
+      async (settings) => {
+        this.settings = settings;
+        await this.saveSettings();
+      },
+      () => this.rescheduleAutoSyncScheduler()
+    );
   }
 
   /**
@@ -1754,20 +2006,72 @@ export default class RemotelySavePlugin extends Plugin {
     this.vaultRandomID = vaultRandomID;
   }
 
-  enableAutoSyncIfSet() {
-    if (
-      this.settings.autoRunEveryMilliseconds !== undefined &&
-      this.settings.autoRunEveryMilliseconds !== null &&
-      this.settings.autoRunEveryMilliseconds > 0
-    ) {
-      this.app.workspace.onLayoutReady(() => {
-        const intervalID = window.setInterval(() => {
-          this.syncRun("auto");
-        }, this.settings.autoRunEveryMilliseconds);
-        this.autoRunIntervalID = intervalID;
-        this.registerInterval(intervalID);
+  enableAdaptiveActivityTracking() {
+    installAdaptiveActivityListeners({
+      desktop: Platform.isDesktopApp,
+      now: () => Date.now(),
+      onActivity: (activityAtMs) =>
+        this.autoSyncScheduler?.recordActivity(activityAtMs),
+      registerDocument: (event, listener, capture) => {
+        this.registerDomEvent(document, event, listener, { capture });
+        return undefined;
+      },
+      registerWindow: (event, listener, capture) => {
+        this.registerDomEvent(window, event, listener, { capture });
+        return undefined;
+      },
+    });
+  }
+
+  getAutoSyncPolicy(): AutoSyncPolicy {
+    return createAutoSyncPolicy(
+      normalizeAutoSyncSettings(this.settings),
+      Platform.isDesktopApp
+    );
+  }
+
+  startAutoSyncScheduler() {
+    if (this.autoRunIntervalID !== undefined) {
+      window.clearInterval(this.autoRunIntervalID);
+      this.autoRunIntervalID = undefined;
+    }
+    if (this.autoSyncScheduler === undefined) {
+      this.autoSyncScheduler = new CompletionAwareAutoSyncScheduler({
+        now: () => Date.now(),
+        setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimer: (timerId) => window.clearTimeout(timerId),
+        getPolicy: () => this.getAutoSyncPolicy(),
+        isBusy: () => this.isSyncing,
+        runAutoSync: async () => await this.syncRun("auto"),
       });
     }
+    this.autoSyncScheduler.start();
+  }
+
+  rescheduleAutoSyncScheduler() {
+    if (this.autoRunIntervalID !== undefined) {
+      window.clearInterval(this.autoRunIntervalID);
+      this.autoRunIntervalID = undefined;
+    }
+    if (this.autoSyncScheduler === undefined) {
+      this.startAutoSyncScheduler();
+      return;
+    }
+    this.autoSyncScheduler.reschedule();
+  }
+
+  stopAutoSyncScheduler() {
+    if (this.autoRunIntervalID !== undefined) {
+      window.clearInterval(this.autoRunIntervalID);
+      this.autoRunIntervalID = undefined;
+    }
+    this.autoSyncScheduler?.stop();
+  }
+
+  enableAutoSyncIfSet() {
+    this.app.workspace.onLayoutReady(() => {
+      this.startAutoSyncScheduler();
+    });
   }
 
   enableInitSyncIfSet() {
@@ -1918,8 +2222,7 @@ export default class RemotelySavePlugin extends Plugin {
   }
 
   async saveAgreeToUseNewSyncAlgorithm() {
-    this.settings.agreeToUseSyncV3 = true;
-    await this.saveSettings();
+    await this.applyNormalizedSettingsAndReschedule({ agreeToUseSyncV3: true });
   }
 
   setCurrSyncMsg(
@@ -2069,7 +2372,7 @@ export default class RemotelySavePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       // init run
       window.setTimeout(() => {
-        clearAllLoggerOutputRecords(this.db);
+        clearExpiredSyncLogRecords(this.db);
       }, initClearOutputToDBHistAfterMilliseconds);
     });
   }

@@ -36,27 +36,11 @@ class GoogleDriveAuthModal extends Modal {
     const { contentEl } = this;
     const t = this.t;
 
-    const authUrl = "https://remotelysave.com/auth/googledrive/start";
     const div2 = contentEl.createDiv();
     div2.createDiv({
-      text: stringToFragment(t("modal_googledriveauth_tutorial")),
-    });
-    div2.createEl(
-      "button",
-      {
-        text: t("modal_googledriveauth_copybutton"),
-      },
-      (el) => {
-        el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_googledriveauth_copynotice"));
-        };
-      }
-    );
-
-    contentEl.createEl("p").createEl("a", {
-      href: authUrl,
-      text: authUrl,
+      text: stringToFragment(
+        `${t("modal_googledriveauth_tutorial")}<br/><br/>This fork removes the hosted auth helper. Paste a Google Drive refresh token directly below.`
+      ),
     });
 
     let refreshToken = "";

@@ -1,7 +1,7 @@
 {
-  "name": "remotely-save",
-  "version": "0.5.25",
-  "description": "This is yet another sync plugin for Obsidian app.",
+  "name": "obsidian-sync-go",
+  "version": "0.6.0",
+  "description": "A personal Obsidian sync plugin fork for self-hosted and cloud sync workflows.",
   "scripts": {
     "dev2": "node esbuild.config.mjs --watch",
     "build2": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",

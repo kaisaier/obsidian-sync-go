@@ -17,6 +17,21 @@ const TRANSIENT_CODES = new Set([
   "EAI_AGAIN",
 ]);
 
+export const REMOTE_PASSWORD_CHECK_TIMEOUT_MS = 120_000;
+
+export type RemoteOperationOptions = {
+  readonly label: string;
+  readonly timeoutMs: number;
+  readonly attempts?: number;
+  readonly baseDelayMs?: number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+};
+
+export type RemoteOperationRunner = <T>(
+  operation: () => Promise<T>,
+  options: RemoteOperationOptions
+) => Promise<T>;
+
 export function isTransientRemoteError(error: unknown) {
   if (error === null || typeof error !== "object") {
     return false;
@@ -73,13 +88,7 @@ export async function withTimeout<T>(
 
 export async function retryRemoteOperation<T>(
   operation: () => Promise<T>,
-  options: {
-    label: string;
-    timeoutMs: number;
-    attempts?: number;
-    baseDelayMs?: number;
-    sleep?: (milliseconds: number) => Promise<void>;
-  }
+  options: RemoteOperationOptions
 ) {
   const attempts = options.attempts ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
@@ -99,6 +108,76 @@ export async function retryRemoteOperation<T>(
     }
   }
   throw new SyncSafetyError(`${options.label} exhausted all retry attempts`);
+}
+
+export async function checkRemotePassword<
+  T extends { readonly ok: boolean; readonly reason: string },
+>(
+  operation: () => Promise<T>,
+  runRemoteOperation: RemoteOperationRunner = retryRemoteOperation
+): Promise<T> {
+  return await runRemoteOperation(operation, {
+    label: "remote password check",
+    timeoutMs: REMOTE_PASSWORD_CHECK_TIMEOUT_MS,
+  });
+}
+
+export async function listRemoteWithDeadline<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  runRemoteOperation: RemoteOperationRunner = retryRemoteOperation
+): Promise<T> {
+  // The deadline stops this sync pipeline; provider I/O may settle later without universal cancellation.
+  return await runRemoteOperation(operation, {
+    label: "remote listing",
+    timeoutMs,
+    attempts: 1,
+  });
+}
+
+export type RemoteListingPipelineOptions<TRemote, TLocal, THistory, TPlan> = {
+  readonly listingTimeoutMs: number;
+  readonly listRemote: () => Promise<TRemote>;
+  readonly listLocal: (remote: TRemote) => Promise<TLocal>;
+  readonly readHistory: (remote: TRemote, local: TLocal) => Promise<THistory>;
+  readonly buildPlan: (
+    remote: TRemote,
+    local: TLocal,
+    history: THistory
+  ) => Promise<TPlan>;
+  readonly applyWrites: (plan: TPlan) => Promise<void>;
+  readonly runRemoteOperation?: RemoteOperationRunner;
+};
+
+export type RemoteListingPipelineOutcome =
+  | { readonly outcome: "success" }
+  | { readonly outcome: "failure"; readonly error: SyncSafetyError };
+
+export async function runRemoteListingPipeline<
+  TRemote,
+  TLocal,
+  THistory,
+  TPlan,
+>(
+  options: RemoteListingPipelineOptions<TRemote, TLocal, THistory, TPlan>
+): Promise<RemoteListingPipelineOutcome> {
+  try {
+    const remote = await listRemoteWithDeadline(
+      options.listRemote,
+      options.listingTimeoutMs,
+      options.runRemoteOperation
+    );
+    const local = await options.listLocal(remote);
+    const history = await options.readHistory(remote, local);
+    const plan = await options.buildPlan(remote, local, history);
+    await options.applyWrites(plan);
+    return { outcome: "success" };
+  } catch (error) {
+    if (error instanceof SyncSafetyError) {
+      return { outcome: "failure", error };
+    }
+    throw error;
+  }
 }
 
 export function assertRemoteListingPlausible(

@@ -1,5 +1,6 @@
 import cloneDeep from "lodash/cloneDeep";
 import { type App, Modal, Notice, Setting } from "obsidian";
+import { copyTextToClipboard } from "../../src/clipboard";
 import { getClient } from "../../src/fsGetter";
 import type { TransItemType } from "../../src/i18n";
 import type RemotelySavePlugin from "../../src/main";
@@ -49,8 +50,12 @@ class YandexDiskAuthModal extends Modal {
       },
       (el) => {
         el.onclick = async () => {
-          await navigator.clipboard.writeText(authUrl);
-          new Notice(t("modal_yandexdiskauth_copynotice"));
+          const copied = await copyTextToClipboard(authUrl);
+          new Notice(
+            copied
+              ? t("modal_yandexdiskauth_copynotice")
+              : t("clipboard_copy_failed")
+          );
         };
       }
     );
